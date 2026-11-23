@@ -16,6 +16,12 @@ This document is the single source of truth for the Modular Synced List design. 
 - "Synced" means changes go through the server. It does **not** mean every client always shows the same list; that is one possible configuration.
 - The module should support as many cases as we can think of, for example the server sending to only one client, or a client searching only its own rows.
 
+### Name and code layout
+- The module's name is **ModularSyncedList**: the folder, the assembly and the namespace.
+- The module is **one assembly**, `Assets/ModularSyncedList/ModularSyncedList.asmdef`. It may use `UnityEngine`; its Unity-facing parts (toggle group UI, the adapter for the team's networking library) are in the same assembly.
+- Each list implementation lives in its own folder outside the module, with its own assembly that references the module (e.g. `Assets/DetectionQueue/DetectionQueue.asmdef`). The module never references a list implementation.
+- Tests don't ship with the module. They are a separate test assembly outside the module's folder (`Assets/ModularSyncedListTests/`), so copying `Assets/ModularSyncedList/` into another project brings no tests.
+
 **Background:** the team leader's original PRD, Architecture and Features & Tasks documents cover more areas than this document (threading, persistence, several servers, limits, diagnostics, directory and subscriptions). They are a checklist of areas the module will eventually need. Where they differ from this document, this document is the current design.
 
 ---
@@ -300,7 +306,6 @@ One project's implementation, used as a test case for the module, **not** its bl
 - **Where per-client action configuration comes from,** and whether the server checks a client's authority before processing a request.
 - **Whether the server keeps an order for a shared list it sorts itself** (as the detection queue did for top 10), or sorts on demand.
 - **UI binding:** whether the module owns the binding from rows to UI game objects, or only data and events.
-- **Name:** "Modular Synced List" is the current name; "Hub List" was the main alternative considered.
 
 ### Left for implementation
 - How a client gets a key for a row it creates (wait for the server, or a temporary key).
