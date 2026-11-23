@@ -1,6 +1,6 @@
 # Modular Synced List: Concept
 
-Last updated: Nov 19, 2026 · Status: design in progress, no code yet
+Last updated: Nov 23, 2026 · Status: design in progress, no code yet
 
 This document is the single source of truth for the Modular Synced List design. Everyone working on the project, people and AI assistants alike, reads it before design or code work and updates it when a decision is made. Sections marked **Open** or **Parked** are not decided; everything else is.
 
@@ -12,7 +12,7 @@ This document is the single source of truth for the Modular Synced List design. 
 - The server holds the list, and everything passes through it. Outside systems send information only to the server, and clients connect only to the server.
 - The server can change row information based on the data it receives, and clients can change it through their actions.
 - Clients are not "dumb": each client holds rows as data and can filter, sort and search locally.
-- Every client action is either synced through the server (it can affect other clients) or local (it changes only that client).
+- Every client action is either synced through the server (it can affect other clients) or local (it changes only that client). Technically, a synced action is a **request** and a local action is a **declaration** (section 7).
 - "Synced" means changes go through the server. It does **not** mean every client always shows the same list; that is one possible configuration.
 - The module should support as many cases as we can think of, for example the server sending to only one client, or a client searching only its own rows.
 
@@ -31,8 +31,9 @@ This document is the single source of truth for the Modular Synced List design. 
 | Internal row key | A unique `int` used only by the module to identify a row, unrelated to any row data |
 | Input | Something an outside system sends to the server. It may create a row, change rows, or do nothing. It is not a row and is not stored |
 | Input handler | The step that matches an input against existing rows and decides: create a row, update matched rows, or ignore. Can run on the server, on a client, or both |
-| Client declaration | A client action done locally at once, then reported to the server without waiting. Either **saved** or **unsaved** |
-| Client request | A client action that happens only after the server sends a perform message |
+| Field | One parameter of a row type, declared once by the list implementation (id, getter, setter, serializer). The declaration gives a typed handle used everywhere the module needs that parameter |
+| Client declaration | A local client action: done at once by that client only, then reported to the server without waiting. Other clients never perform it. Either **saved** or **unsaved** |
+| Client request | A synced client action: it happens only when a perform message arrives, on the clients the server chooses (possibly only the requester) |
 | Perform message | The server's message telling clients to carry out an action |
 | Master list | The server's dictionary of every row, with base values |
 | Client reconnection data | Per client, on the server: which rows the client holds and its overrides |
@@ -42,6 +43,7 @@ This document is the single source of truth for the Modular Synced List design. 
 | Saved state | Values that exist only for one client and must survive a reconnect |
 | Level 1 / Level 2 | Whether the server keeps nothing per client (1) or keeps client reconnection data (2) |
 | Give row / Take row | Working names: the server adds an existing row to a client, or removes it from a client |
+| Transport | The small interface the module sends and receives messages through: send bytes to a client id, receive bytes with the sender's client id |
 
 ---
 
@@ -66,6 +68,14 @@ This document is the single source of truth for the Modular Synced List design. 
 - Other module states (visible, selected/pinned, position) exist only when the list turns on the feature that produces them (top N, toggle group, ordering). A list without top N has no visible state.
 - The module never reads row parameters directly. It calls functions the list implementation supplies, such as a compare function for sorting. The score and its scale belong to the list implementation.
 
+### Fields
+- No reflection, anywhere in the module.
+- The list implementation declares each field of a row type once: an id, a getter, a setter and a serializer. The declaration returns a typed handle (e.g. `Field<DetectionRowData, int> EntityId`).
+- The handle is used everywhere afterwards: lookups (`AddLookup(EntityId)`), overrides, `Set(key, IsPinned, true)` (type-checked), `Find(EntityId, 42)`.
+- The field id is what travels in partial updates and in `FieldOverrides`, never the field's name.
+- Only the list implementation declares fields. The module has no fields of its own.
+- Declarations are hand-written for now. A compile-time source generator (still no runtime reflection) can be added later if declaring them gets tedious.
+
 ### Internal row key
 - Lesson from the detection queue: the detection id was both a displayed parameter and the server's dictionary key. Identity must not be row data.
 - An incrementing `int` per list, always assigned by the server, even for rows created on a client. Never reused.
@@ -75,7 +85,10 @@ This document is the single source of truth for the Modular Synced List design. 
 - Filtering, sorting and data management are shared code used by both the server and the client.
 - All bookkeeping is written once in the module: adding, removing, moving a key in a lookup when an indexed parameter changes, re-sorting.
 - Every change goes through the module (`Add`, `Remove`, `Set`), never by editing a row object directly, so lookups and order stay correct.
-- Lookups map a parameter value to a `HashSet<int>` of keys, so a value can belong to one row or several.
+- Lookups map a parameter value to a `HashSet<int>` of keys, so a value can belong to one row or several. A lookup can be added on any field, including a `bool` (e.g. `Find(IsPinned, true)`).
+- `Set` raises `FieldChanged(key, field, old, new)` only when the value actually changes (principle 6), and only after the lookups are updated. It is shaped so an origin (local declaration, server perform, correction) can be added later.
+- Sending to the server belongs to the action, never to a `FieldChanged` listener. A listener can't tell a server change from a local one, or which action caused it (principle 3).
+- One action can make several changes; they are sent and applied in order.
 
 ---
 
@@ -124,6 +137,8 @@ Dictionary<TValue, HashSet<int>> lookup;  // for local search and the client's i
 
 ### Declarations and requests
 - Each client action is configured as a declaration or a request. Configuration is per action and can differ per client (e.g. only client 1 may remove rows).
+- **Declaration = local.** The client acts at once and reports to the server. The server never sends a perform message to other clients for it: they would act later than the sender, and the clients would be out of step. For a saved declaration the server only records the result or rule for that client.
+- **Request = synced.** Anything that must happen on more than one client is a request, so every client that performs it does so on the same perform message (e.g. the detection queue's shared pin). The client chooses declaration or request; the server chooses the perform message's recipients, which can be only the requester.
 - An action's configuration controls only what a client can **send**, never what it accepts. Every client applies every change the server sends it.
 - **Unsaved declaration:** changes only the unsaved view. The server keeps nothing.
 - **Saved declaration:** its effect must survive a reconnect, whatever it touches (a row field, a row state, the order). It carries either saved state (the server keeps the result) or a runtime rule (the server keeps the rule).
@@ -146,6 +161,16 @@ Dictionary<TValue, HashSet<int>> lookup;  // for local search and the client's i
 - The server identifies the sender from the network layer (the sender IP comes with every message), never from data the client writes into a message.
 - The module uses its own client id internally, mapped from the connection (IP by default), in case several clients share a machine or an IP changes.
 
+### Networking library and project
+- The server and the clients build from **one Unity project** (shared `Assets/`). The module only needs to know at startup whether it is the server or a client; scenes or a role switch are a separate choice.
+- Messages are carried by the team's own networking library. It can send to a specific client and gives the sender with every message.
+- The module depends on no networking library. It talks to a **transport**: send bytes to a client id, receive bytes with the sender's client id. An in-process loopback transport is used for tests (a server and several clients in one test) until the adapter for the team's library is written.
+
+### Threading
+- The team's networking library delivers every message on Unity's main thread, one at a time, so two input handlers never run at once.
+- The module is single-threaded on the main thread: every call (`SubmitInput`, `Add`, `Remove`, `Set`, sorting, UI reads) comes from it. No queue and no locks, so inputs get no extra delay.
+- In debug builds every module call checks that it runs on the main thread and throws a clear error if not.
+
 ---
 
 ## 8. Toggle group
@@ -153,8 +178,20 @@ Dictionary<TValue, HashSet<int>> lookup;  // for local search and the client's i
 - Problem in the detection queue: the toggle changed its state on click in order to fire its event, so the sender changed before the server approved while other clients waited for the perform message.
 - The module has its own toggle group: a click only raises a "toggle requested" event, and the state changes only when the group is told to apply it (locally for a declaration, on the perform message for a request). Sender and other clients go through the same path.
 - Select and unselect are two separate messages. Pinning a new row sends unselect (old) then select (new), in order.
-- Each client's toggle group corrects itself to its rule (e.g. only one pinned), and a correction is an ordinary synced action. A brief double pin can show for a moment and corrects itself; acceptable on a LAN.
+- Each client's toggle group corrects itself to its rule (e.g. only one pinned), and a correction is an ordinary action. A brief double pin can show for a moment and corrects itself; acceptable on a LAN.
 - Rules such as one-at-a-time, allow-none or max N are group settings.
+
+### How it works
+- The toggle group holds **no state**. It keeps no copy of which rows are selected; it is a rule over a `bool` field (e.g. `IsPinned`) and reads the current selection through the list's lookup: `Find(IsPinned, true)`. It works the same for any `bool` field.
+- It does keep a `Dictionary<int, RowToggle>` (row key → toggle). That is UI wiring, not state.
+- A perform is the only thing that changes row fields (from the server's perform message for a request, or done locally for a declaration), and a toggle always shows its field's value, so a toggle is never out of step with its row.
+- Flow, with row 3 pinned and the user clicking row 7 under "one at a time":
+  1. The toggle tells the group "row 7 clicked". Nothing visual changes.
+  2. The group reads what's selected and applies its rule: unselect row 3 (`IsPinned = false`), then select row 7 (`IsPinned = true`), in order.
+  3. The action runs as a request or a declaration.
+  4. The perform calls `Set`, `Set` raises `FieldChanged`, and the group tells the toggles of rows 3 and 7 what to show.
+- Every client goes through the same perform path.
+- The toggle group is built after the core, on top of fields, `Set`, lookups and `FieldChanged`.
 
 ---
 
@@ -262,7 +299,6 @@ One project's implementation, used as a test case for the module, **not** its bl
 - **A client input handler skipping a row:** on reconnect the skip isn't replayed. Probably expressed either as "remove for me" (permanent) or as a standing rule (re-evaluated); the list implementation chooses.
 - **Where per-client action configuration comes from,** and whether the server checks a client's authority before processing a request.
 - **Whether the server keeps an order for a shared list it sorts itself** (as the detection queue did for top 10), or sorts on demand.
-- **Networking:** which library carries the messages, and whether the server and clients build from the same Unity project.
 - **UI binding:** whether the module owns the binding from rows to UI game objects, or only data and events.
 - **Name:** "Modular Synced List" is the current name; "Hub List" was the main alternative considered.
 
@@ -280,6 +316,11 @@ One project's implementation, used as a test case for the module, **not** its bl
 - Server-side filtering per client (the server sends only what passes a client's conditions).
 - Storing overrides once per group instead of per client.
 - The `heldKeys` "default minus/plus" optimization.
+- Toggle group, until it is implemented:
+  - Overflow behavior for "at most N": move, refuse, unselect the oldest, or custom. "Oldest" needs a selection-order field declared by the list implementation.
+  - "At least N" selected.
+  - Rows that can't be toggled.
+  - Adding the origin to `FieldChanged`.
 
 ### Out of scope for now
 - Server restart: all data, including client reconnection data, is lost.
