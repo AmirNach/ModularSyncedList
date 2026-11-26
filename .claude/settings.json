@@ -5,5 +5,20 @@
       "Edit(//d/NetworkCommunication/**)",
       "Edit(**/NetworkCommunication/**)"
     ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "timeout": 30,
+            "statusMessage": "Checking GitHub for coworkers' pushes",
+            "command": "GIT_TERMINAL_PROMPT=0 git fetch -q 2>/dev/null; n=$(git rev-list --count HEAD..@{u} 2>/dev/null); if [ \"${n:-0}\" -gt 0 ]; then echo \"Git: origin has $n new commit(s) not in your local branch. Tell the user and pull (merge) before working:\"; git log --format='  %h %an: %s' HEAD..@{u} | head -10; else echo 'Git: up to date with origin.'; fi; exit 0"
+          }
+        ]
+      }
+    ]
   }
 }
