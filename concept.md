@@ -37,7 +37,9 @@ This document is the single source of truth for the Modular Synced List design. 
 | Internal row key | A unique `int` used only by the module to identify a row, unrelated to any row data |
 | Input | Something an outside system sends to the server. It may create a row, change rows, or do nothing. It is not a row and is not stored |
 | Input handler | The step that matches an input against existing rows and decides: create a row, update matched rows, or ignore. Can run on the server, on a client, or both |
-| Field | One parameter of a row type, declared once by the list implementation (id, getter, setter, serializer). The declaration gives a typed handle used everywhere the module needs that parameter |
+| Field | One parameter of a row type, declared once by the list implementation (name, value getter, value setter). The declaration gives a typed handle, `Field<TRow, TValue>`, used everywhere the module needs that parameter |
+| FieldList | All fields of one row type (`FieldList<TRow>`). It creates the field handles and finds a field by its name |
+| IField | The interface every `Field<TRow, …>` of one row type shares (`IField<TRow>`), so the module can hold and loop over fields of different value types together |
 | Client declaration | A local client action: done at once by that client only, then reported to the server without waiting. Other clients never perform it. Either **saved** or **unsaved** |
 | Client request | A synced client action: it happens only when a perform message arrives, on the clients the server chooses (possibly only the requester) |
 | Perform message | The server's message telling clients to carry out an action |
@@ -77,9 +79,23 @@ This document is the single source of truth for the Modular Synced List design. 
 
 ### Fields
 - No reflection, anywhere in the module.
-- The list implementation declares each field of a row type once: an id, a getter, a setter and a serializer. The declaration returns a typed handle (e.g. `Field<DetectionRowData, int> EntityId`).
+- `TRow` is the row class (e.g. `DetectionRowData`); `TValue` is one field's type (e.g. `bool` for `IsPinned`).
+- The list implementation declares each field of a row type once, in a static class, with one line per field: its name, a **value getter** and a **value setter**. The getter and setter are delegates that know that one field on that one row type; they replace reflection.
+  ```csharp
+  public static class DetectionFields
+  {
+      public static FieldList<DetectionRowData> All = new FieldList<DetectionRowData>();
+
+      public static Field<DetectionRowData, bool> IsPinned =
+          All.Add(nameof(DetectionRowData.IsPinned), row => row.IsPinned, (row, value) => row.IsPinned = value);
+  }
+  ```
+- `FieldList.Add` creates the handle (`Field<TRow, TValue>`) and returns it. The static class makes the server's list and every client's list use the same handles.
+- On the handle, `GetValue(row)` is public; `SetValue(row, value)` is `internal`, so only the module can change a field and lookups and order always stay correct.
 - The handle is used everywhere afterwards: lookups (`AddLookup(EntityId)`), overrides, `Set(key, IsPinned, true)` (type-checked), `Find(EntityId, 42)`.
-- The field id is what travels in partial updates and in `FieldOverrides`, never the field's name.
+- **Fields are identified by name only, with no numeric ids.** The name comes from `nameof(...)`, so it is compile-checked and not reflection. It is what travels in partial updates (e.g. `[row 5] ["IsPinned"] [true]`) and keys per-field storage (lookups, `FieldOverrides`), so messages, logs and the debugger are readable. `FieldList` finds a field with `GetByName`, and `Add` throws if two fields of one row type have the same name.
+- Cost accepted: messages are about twice the size for small updates. Switching to numeric ids later would be internal to the module; no list implementation would change.
+- The module holds fields of different value types together through `IField<TRow>` (name, and later the methods to write and read a value as bytes), for example to send a full row or to apply a received change.
 - Only the list implementation declares fields. The module has no fields of its own.
 - Declarations are hand-written for now. A compile-time source generator (still no runtime reflection) can be added later if declaring them gets tedious.
 
