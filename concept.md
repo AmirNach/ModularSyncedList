@@ -53,6 +53,9 @@ This document is the single source of truth for the Modular Synced List design. 
 | Give row / Take row | Working names: the server adds an existing row to a client, or removes it from a client |
 | Transport | The small interface the module sends and receives messages through: send bytes to a client id, receive bytes with the sender's client id |
 | NetCom | The team's networking library (namespace `NetCom`). The module uses it exactly as it is and never changes it |
+| Router | One per process (server or client): owns the NetCom connection and routes each module message to its list. On the server it also owns everything kept per client across lists |
+| List definition | A `ScriptableObject` asset that defines one list: its row type, fields, compare function, conditions and actions. Server and clients use the same asset |
+| Join | A client's message saying it now has a list; the server's join point for that client and list |
 
 ---
 
@@ -194,11 +197,14 @@ Dictionary<TValue, HashSet<int>> lookup;  // for local search and the client's i
 - NetCom's TCP has no length framing: each read is parsed as whole messages, and a message split across two reads is dropped. Receive buffers are 2048 bytes on the server and 100000 on the client. Message sizes must be designed around this (section 12).
 - The module depends on no networking library. It talks to a **transport**: send bytes to a client id, receive bytes with the sender's client id. An in-process loopback transport is used for tests (a server and several clients in one test) until the adapter for the team's library is written.
 
-### Several lists on one connection (direction agreed, details open)
-- A project's server holds many lists. One manager per process (server or client) owns the connection and routes each module message to its list.
-- Every module message says which list it belongs to.
-- Creating a list on the server and connecting a client to it must be easy, set up from the inspector: a client puts a component in its scene and points it at the list.
-- How each part works is **Open** (section 12).
+### Several lists on one connection
+- A project's server holds many lists. One **Router** per process (server or client) owns the connection and routes each module message to its list.
+- **The Router:** a plain C# class with a thin `MonoBehaviour` for scenes, never a static singleton, so a test can run one server Router and several client Routers in one process. The server Router also owns everything kept per client across lists: the client id, reconnect recognition and the reconnection data timer.
+- **List id:** every module message carries its list's id, a stable 32-bit FNV-1a hash of the list's name (never `string.GetHashCode()`). Server and clients compute it the same way because they build from one project. The server Router throws at registration if two names give the same id. Id `0` is reserved for the Router's own messages (join, reconnect).
+- **List definition:** each list is a `ScriptableObject` asset of a class from the list implementation, e.g. `DetectionQueueDefinition : SyncedListDefinition<DetectionRowData>`. The list's name defaults to the asset's name. The asset carries the row type, so `router.Get(detectionQueue)` returns the typed list with no cast. Two assets of the same class are two separate lists.
+- **Server lists come from the inspector only:** the server Router has a list of definition assets and creates those lists at startup. Lists aren't created from code at runtime, because each list needs its own config and that belongs in its asset.
+- **Joining:** a client puts a `SyncedListClient` component in its scene and drags the definition asset into it. When the component enables, the client Router sends a join on id `0`. On join, a new client's `heldKeys` is created from `keysForNewClients`, and a known client gets its full send with overrides (the same as a reconnect). Until a client joins a list, the server sends it nothing for that list; a message for a list the client hasn't joined is dropped, with a log in debug builds.
+- **Leaving:** when the component is destroyed (for example its scene unloads), the client Router tells the server, which stops sending that list to the client but keeps its `heldKeys` and overrides, like a disconnect for one list. It never counts as "remove for me". If the component comes back, the join does a full send.
 
 ### Threading
 - NetCom delivers every message, and its connect and disconnect events, on Unity's main thread: `NetworkDispatcher` queues them and runs them one at a time in `Update`. So two input handlers never run at once.
@@ -334,14 +340,7 @@ One project's implementation, used as a test case for the module, **not** its bl
 - **Where per-client action configuration comes from,** and whether the server checks a client's authority before processing a request.
 - **Whether the server keeps an order for a shared list it sorts itself** (as the detection queue did for top 10), or sorts on demand.
 - **UI binding:** whether the module owns the binding from rows to UI game objects, or only data and events.
-- **Routing several lists** (proposals, not approved):
-  - Name the manager the **hub**: one per process, plain C# with a thin `MonoBehaviour`, not a static singleton (tests run one server hub and several client hubs in one process). The server hub also owns everything kept per client across lists (client id, reconnect recognition, the reconnection data timer).
-  - The list id is a stable hash (FNV-1a, not `string.GetHashCode()`) of the list's name. The server hub throws at registration on a collision. Id `0` is reserved for the hub's own messages. Alternatives: hand-written constants, or the server sends a name→id table at connect.
-  - Each list is a `ScriptableObject` definition asset (e.g. `DetectionQueueDefinition : SyncedListDefinition<DetectionRowData>`) that declares fields, compare function, conditions and actions. Components take the asset instead of a typed name, and `hub.Get(asset)` returns the typed list. Alternative: a typed name string.
-  - The server creates lists from a list of assets on the server hub, or from code (`hub.CreateServerList(asset)`).
-  - A client **joins** a list when its `SyncedListClient` component enables. The join is the list's join point: a new client gets `heldKeys` from `keysForNewClients`; a known client gets its full send with overrides. Until a client joins, the server sends it nothing for that list.
-  - When the component is destroyed, the server stops sending that list to the client but keeps its `heldKeys` and overrides, like a disconnect for one list. It never counts as "remove for me".
-- **Where the NetCom adapter lives.** Proposal: its own folder without an `.asmdef` (e.g. `Assets/ModularSyncedListNetCom/`), compiled with NetCom, implementing the module's transport interface. The module and list implementations never reference it; a scene component hands it to the hub.
+- **Where the NetCom adapter lives.** Proposal: its own folder without an `.asmdef` (e.g. `Assets/ModularSyncedListNetCom/`), compiled with NetCom, implementing the module's transport interface. The module and list implementations never reference it; a scene component hands it to the Router.
 - **NetCom message ids for the module.** Proposal: one `NetMessage` type for all module traffic (list id, message type, payload), so the module takes a single NetCom id. Which id, and how a project avoids a clash (NetCom only logs an error), is not decided.
 - **Message sizes under NetCom's missing framing.** A full send of many rows can be split across reads and dropped. Proposal: send each row as its own small message, keep client messages well under 2048 bytes, and measure a large full send over real NetCom early.
 
