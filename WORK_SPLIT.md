@@ -13,7 +13,7 @@ How the two of us work on ModularSyncedList in parallel without getting in each 
 | | Ariel | Amir |
 | --- | --- | --- |
 | Area | **Core data** | **Networking** |
-| What | The list class and internal row key; `Add` / `Remove` / `Set` and `FieldChanged`; lookups and `Find`; the derived `order`; fields (`Field`, `FieldList`, `IField`) | The transport and its NetCom adapter; the loopback transport for tests; the module's message envelope; NetCom's limits; the hub and routing several lists |
+| What | The list class and internal row key; `Add` / `Remove` / `Set` and `FieldChanged`; lookups and `Find`; the derived `order`; fields (`Field`, `FieldList`, `IField`) | The transport and its NetCom adapter; the loopback transport for tests; the module's message envelope; NetCom's limits; the Router and routing several lists |
 | Folder | `Assets/ModularSyncedList/Core/` | `Assets/ModularSyncedList/Transport/` and the NetCom adapter's folder |
 | `concept.md` sections | 4, 5, 8 | 7 (networking, several lists, threading), and his items in 12 |
 
@@ -26,7 +26,7 @@ How the two of us work on ModularSyncedList in parallel without getting in each 
 3. **NetCom adapter.** An `ITransport` built on `NetworkServerManager` / `NetworkClientManager`. Maps NetCom's `IPEndPoint` to the module's `int` client id. Where its folder lives is **Open** in `concept.md` §12 (NetCom has no `.asmdef`).
 4. **Message envelope.** One `NetMessage` type for all module traffic: list id, message type, payload. The payload is a plain `byte[]` for now. Which NetCom message id the module takes is **Open**.
 5. **Measure NetCom's limits early.** How big a message can get before NetCom splits it across reads and drops it (no length framing; 2048-byte server receive buffer). Then propose: one row per message, framing inside the payload, or something else. Fields are identified by name in messages (decided, `concept.md` §4), so messages are a bit larger than with numeric ids.
-6. **Hub and routing several lists.** Your proposals in `concept.md` §12. Settle them with Ariel before coding.
+6. **Router and routing several lists.** Amir's decisions are in `concept.md` §7, "Several lists on one connection": one Router per process (no singleton), list ids from an FNV-1a hash of the list name, `ScriptableObject` list definitions, server lists from the inspector only, and joining and leaving per `SyncedListClient` component. Ariel reviews them before coding (Open items need both of us).
 
 ### What to read
 - `concept.md` §1–2 (what it is, terms), §3 (principles), §7 (actions, NetCom, several lists, threading), §12 (your Open items).
