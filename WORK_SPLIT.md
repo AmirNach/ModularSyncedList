@@ -4,7 +4,7 @@ Last updated: Nov 26, 2026
 
 How the two of us work on ModularSyncedList in parallel without getting in each other's way. `concept.md` is still the single source of truth for the design; this file only says who works on what.
 
-**Where things stand:** the design is in `concept.md`. No module code exists yet.
+**Where things stand:** the design is in `concept.md`. No module code exists yet. **We are in the design-only phase** (see `WORKFLOW.md`): each of us fills the gaps in our part of `concept.md`, and nobody writes code until we agree the design is complete. The folders below are where the code will go later.
 
 ---
 
@@ -19,14 +19,20 @@ How the two of us work on ModularSyncedList in parallel without getting in each 
 
 ---
 
-## Amir: networking, in this order
+## Amir: networking design topics, in this order
 
-1. **Agree on `ITransport` with Ariel first** (see "The shared contract" below). It's the only code both sides touch, so nothing else starts until it's agreed.
-2. **Loopback transport.** An in-process `ITransport` that connects one server and several clients inside one test, with no network. Ariel's tests will use it later to check sync.
-3. **NetCom adapter.** An `ITransport` built on `NetworkServerManager` / `NetworkClientManager`. Maps NetCom's `IPEndPoint` to the module's `int` client id. Where its folder lives is **Open** in `concept.md` §12 (NetCom has no `.asmdef`).
-4. **Message envelope.** One `NetMessage` type for all module traffic: list id, message type, payload. The payload is a plain `byte[]` for now. Which NetCom message id the module takes is **Open**.
-5. **Measure NetCom's limits early.** How big a message can get before NetCom splits it across reads and drops it (no length framing; 2048-byte server receive buffer). Then propose: one row per message, framing inside the payload, or something else. Fields are identified by name in messages (decided, `concept.md` §4), so messages are a bit larger than with numeric ids.
-6. **Router and routing several lists.** Amir's decisions are in `concept.md` §7, "Several lists on one connection": one Router per process (no singleton), list ids from an FNV-1a hash of the list name, `ScriptableObject` list definitions, server lists from the inspector only, and joining and leaving per `SyncedListClient` component. Ariel reviews them before coding (Open items need both of us).
+Each topic ends as a decision written into `concept.md` §7 (or §12 **Open** if it isn't settled), through `/update-concept`. No code.
+
+1. **Agree on `ITransport` with Ariel first** (see "The shared contract" below). It's the boundary between our two parts, so both designs depend on it. Answer the two questions below it. Opinion: two interfaces, one for the server and one for the client (a client only sends to the server), with a plain `int` client id.
+2. **Getting back in sync after a lost message.** NetCom can drop a message silently (no length framing: a message split across two reads is dropped). Describe how a client or the server notices it is out of step and recovers, for example the client asking for a full send. Opinion: the biggest gap in the networking design.
+3. **The server's shared receive buffer.** NetCom's server reads every client into one 2048-byte buffer (a field of `NetworkTcpServer`), so two clients sending at the same moment can overwrite each other's data. NetCom can't be changed, so describe how the module lives with it (small and rare client messages, recovery from topic 2, or something else).
+4. **Message sizes.** How big a message can get before NetCom splits it across reads. Describe how full sends of many rows stay safe: one row per message, framing inside the payload, or something else. Fields are identified by name in messages (decided, `concept.md` §4), so messages are a bit larger than with numeric ids. Testing the real limit waits for the implementation phase.
+5. **The message catalog.** Every module message type (full row, partial update, remove, give row / take row, perform, declaration, request, join, leave, reconnect) with its exact payload layout, who sends it and who receives it.
+6. **Message envelope and NetCom id.** One `NetMessage` type for all module traffic (list id, message type, payload) is the current proposal. Which NetCom message id the module takes, and how a project avoids a clash, is **Open**.
+7. **Client identity and reconnect recognition.** NetCom gives an `IPEndPoint`, whose port changes on every reconnect, and several clients can share a machine. Describe how the server maps a connection to the module's client id and recognizes a returning client. Note that NetCom's "send to all except" filters by IP address, so "everyone except the sender" needs one send per recipient.
+8. **Where the NetCom adapter lives** (**Open** in §12; NetCom has no `.asmdef`), and **which NetCom client manager** the adapter uses: `NetworkClientManager` or `NetworkClientManagerNew`.
+9. **Smaller points:** reliable (TCP) sends only, no UDP; how long the server keeps a disconnected client's reconnection data.
+10. **Router and routing several lists: done, waiting for Ariel's review.** The decisions are in `concept.md` §7, "Several lists on one connection": one Router per process (no singleton), list ids from an FNV-1a hash of the list name, `ScriptableObject` list definitions, server lists from the inspector only, and joining and leaving per `SyncedListClient` component.
 
 ### What to read
 - `concept.md` §1–2 (what it is, terms), §3 (principles), §7 (actions, NetCom, several lists, threading), §12 (your Open items).
@@ -34,7 +40,7 @@ How the two of us work on ModularSyncedList in parallel without getting in each 
 - You can skip §8 (toggle group) and §10–11 for now.
 
 ### Not yours for now
-- **Turning field values into bytes.** It needs both fields (Ariel) and the envelope (Amir). Until both exist, payloads are just `byte[]`. We do this part together.
+- **Turning field values into bytes.** It needs both fields (Ariel) and the envelope (Amir). Until both are designed, payloads are just `byte[]`. We design this part together.
 - Anything inside `Assets/ModularSyncedList/Core/`.
 
 ---
@@ -72,7 +78,7 @@ Questions for Amir to answer when reviewing it:
 - Is one interface for both server and client right, or should the client get its own (a client only sends to the server)?
 - Should the client id be a plain `int`, or a small `ClientId` type?
 
-Once agreed, it goes into `concept.md` §7 and into code at `Assets/ModularSyncedList/Transport/ITransport.cs`, in one commit, before either of us builds on it.
+Once agreed, it goes into `concept.md` §7 before either of us designs on top of it. When implementation starts, it is the first code written, at `Assets/ModularSyncedList/Transport/ITransport.cs`.
 
 ---
 
