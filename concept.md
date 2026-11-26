@@ -1,6 +1,6 @@
 # Modular Synced List: Concept
 
-Last updated: Nov 23, 2026 · Status: design in progress, no code yet
+Last updated: Nov 26, 2026 · Status: design in progress, no code yet
 
 This document is the single source of truth for the Modular Synced List design. Everyone working on the project, people and AI assistants alike, reads it before design or code work and updates it when a decision is made. Sections marked **Open** or **Parked** are not decided; everything else is.
 
@@ -18,7 +18,7 @@ This document is the single source of truth for the Modular Synced List design. 
 
 ### Name and code layout
 - The module's name is **ModularSyncedList**: the folder, the assembly and the namespace.
-- The module is **one assembly**, `Assets/ModularSyncedList/ModularSyncedList.asmdef`. It may use `UnityEngine`; its Unity-facing parts (toggle group UI, the adapter for the team's networking library) are in the same assembly.
+- The module is **one assembly**, `Assets/ModularSyncedList/ModularSyncedList.asmdef`. It may use `UnityEngine`; its Unity-facing parts (toggle group UI) are in the same assembly. Where the NetCom adapter lives is **Open** (section 12): NetCom has no `.asmdef`, so an assembly with one can't reference it.
 - Each list implementation lives in its own folder outside the module, with its own assembly that references the module (e.g. `Assets/DetectionQueue/DetectionQueue.asmdef`). The module never references a list implementation.
 - Tests don't ship with the module. They are a separate test assembly outside the module's folder (`Assets/ModularSyncedListTests/`), so copying `Assets/ModularSyncedList/` into another project brings no tests.
 
@@ -50,6 +50,7 @@ This document is the single source of truth for the Modular Synced List design. 
 | Level 1 / Level 2 | Whether the server keeps nothing per client (1) or keeps client reconnection data (2) |
 | Give row / Take row | Working names: the server adds an existing row to a client, or removes it from a client |
 | Transport | The small interface the module sends and receives messages through: send bytes to a client id, receive bytes with the sender's client id |
+| NetCom | The team's networking library (namespace `NetCom`). The module uses it exactly as it is and never changes it |
 
 ---
 
@@ -169,11 +170,22 @@ Dictionary<TValue, HashSet<int>> lookup;  // for local search and the client's i
 
 ### Networking library and project
 - The server and the clients build from **one Unity project** (shared `Assets/`). The module only needs to know at startup whether it is the server or a client; scenes or a role switch are a separate choice.
-- Messages are carried by the team's own networking library. It can send to a specific client and gives the sender with every message.
+- Messages are carried by **NetCom**, used exactly as it is: its files are never edited, copied or replaced. The module adapts to NetCom.
+  - A message is a `NetMessage` subclass marked `[MessageID(uint)]`. Every message starts with that 4-byte id, and ids are global across the project.
+  - Server: `NetworkServerManager` sends to one client (`SendReliable(msg, IPEndPoint)`) or to all (`SendReliableToAll`), and gives the sender's `IPEndPoint` with every message (`Subscribe<T>(Action<T, IPEndPoint>)`). It raises `OnClientConnect` / `OnClientDisconnect`.
+  - Client: `NetworkClientManager` sends to the server (`SendReliable(msg)`) and receives with `Subscribe<T>(Action<T>)`.
+  - The module's messages override `ToBytes` / `ToMessage` instead of using NetCom's reflection-based default (section 4: no reflection).
+- NetCom's TCP has no length framing: each read is parsed as whole messages, and a message split across two reads is dropped. Receive buffers are 2048 bytes on the server and 100000 on the client. Message sizes must be designed around this (section 12).
 - The module depends on no networking library. It talks to a **transport**: send bytes to a client id, receive bytes with the sender's client id. An in-process loopback transport is used for tests (a server and several clients in one test) until the adapter for the team's library is written.
 
+### Several lists on one connection (direction agreed, details open)
+- A project's server holds many lists. One manager per process (server or client) owns the connection and routes each module message to its list.
+- Every module message says which list it belongs to.
+- Creating a list on the server and connecting a client to it must be easy, set up from the inspector: a client puts a component in its scene and points it at the list.
+- How each part works is **Open** (section 12).
+
 ### Threading
-- The team's networking library delivers every message on Unity's main thread, one at a time, so two input handlers never run at once.
+- NetCom delivers every message, and its connect and disconnect events, on Unity's main thread: `NetworkDispatcher` queues them and runs them one at a time in `Update`. So two input handlers never run at once.
 - The module is single-threaded on the main thread: every call (`SubmitInput`, `Add`, `Remove`, `Set`, sorting, UI reads) comes from it. No queue and no locks, so inputs get no extra delay.
 - In debug builds every module call checks that it runs on the main thread and throws a clear error if not.
 
@@ -306,6 +318,16 @@ One project's implementation, used as a test case for the module, **not** its bl
 - **Where per-client action configuration comes from,** and whether the server checks a client's authority before processing a request.
 - **Whether the server keeps an order for a shared list it sorts itself** (as the detection queue did for top 10), or sorts on demand.
 - **UI binding:** whether the module owns the binding from rows to UI game objects, or only data and events.
+- **Routing several lists** (proposals, not approved):
+  - Name the manager the **hub**: one per process, plain C# with a thin `MonoBehaviour`, not a static singleton (tests run one server hub and several client hubs in one process). The server hub also owns everything kept per client across lists (client id, reconnect recognition, the reconnection data timer).
+  - The list id is a stable hash (FNV-1a, not `string.GetHashCode()`) of the list's name. The server hub throws at registration on a collision. Id `0` is reserved for the hub's own messages. Alternatives: hand-written constants, or the server sends a name→id table at connect.
+  - Each list is a `ScriptableObject` definition asset (e.g. `DetectionQueueDefinition : SyncedListDefinition<DetectionRowData>`) that declares fields, compare function, conditions and actions. Components take the asset instead of a typed name, and `hub.Get(asset)` returns the typed list. Alternative: a typed name string.
+  - The server creates lists from a list of assets on the server hub, or from code (`hub.CreateServerList(asset)`).
+  - A client **joins** a list when its `SyncedListClient` component enables. The join is the list's join point: a new client gets `heldKeys` from `keysForNewClients`; a known client gets its full send with overrides. Until a client joins, the server sends it nothing for that list.
+  - When the component is destroyed, the server stops sending that list to the client but keeps its `heldKeys` and overrides, like a disconnect for one list. It never counts as "remove for me".
+- **Where the NetCom adapter lives.** Proposal: its own folder without an `.asmdef` (e.g. `Assets/ModularSyncedListNetCom/`), compiled with NetCom, implementing the module's transport interface. The module and list implementations never reference it; a scene component hands it to the hub.
+- **NetCom message ids for the module.** Proposal: one `NetMessage` type for all module traffic (list id, message type, payload), so the module takes a single NetCom id. Which id, and how a project avoids a clash (NetCom only logs an error), is not decided.
+- **Message sizes under NetCom's missing framing.** A full send of many rows can be split across reads and dropped. Proposal: send each row as its own small message, keep client messages well under 2048 bytes, and measure a large full send over real NetCom early.
 
 ### Left for implementation
 - How a client gets a key for a row it creates (wait for the server, or a temporary key).

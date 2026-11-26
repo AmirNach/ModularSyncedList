@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "deny": [
+      "Edit(//D:/NetworkCommunication/**)",
+      "Edit(//d/NetworkCommunication/**)",
+      "Edit(**/NetworkCommunication/**)"
+    ]
+  }
+}
