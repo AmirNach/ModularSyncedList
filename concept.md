@@ -51,7 +51,9 @@ This document is the single source of truth for the Modular Synced List design. 
 | Saved state | Values that exist only for one client and must survive a reconnect |
 | Level 1 / Level 2 | Whether the server keeps nothing per client (1) or keeps client reconnection data (2) |
 | Give row / Take row | Working names: the server adds an existing row to a client, or removes it from a client |
-| Transport | The small interface the module sends and receives messages through: send bytes to a client id, receive bytes with the sender's client id |
+| Transport | The two small interfaces the module sends and receives bytes through: `IServerTransport` (addresses connections by connection id) and `IClientTransport` (talks only to the server) |
+| Connection id | A new `int` the server transport gives each connection, never reused. It says nothing about who the client is |
+| Client id | The module's own `int` for one client, kept across reconnects. The server Router maps each connection id to a client id |
 | NetCom | The team's networking library (namespace `NetCom`). The module uses it exactly as it is and never changes it |
 | Router | One per process (server or client): owns the NetCom connection and routes each module message to its list. On the server it also owns everything kept per client across lists |
 | List definition | A `ScriptableObject` asset that defines one list: its row type, fields, compare function, conditions and actions. Server and clients use the same asset |
@@ -185,7 +187,7 @@ Dictionary<TValue, HashSet<int>> lookup;  // for local search and the client's i
 
 ### Client identity
 - The server identifies the sender from the network layer (the sender IP comes with every message), never from data the client writes into a message.
-- The module uses its own client id internally, mapped from the connection (IP by default), in case several clients share a machine or an IP changes.
+- The module uses its own **client id**, kept across reconnects, in case several clients share a machine or an IP changes. The transport only knows connection ids; the server Router maps a connection id to a client id using the **hello** the client sends on Router id `0` right after connecting. What the hello carries is **Open** (section 12).
 
 ### Networking library and project
 - The server and the clients build from **one Unity project** (shared `Assets/`). The module only needs to know at startup whether it is the server or a client; scenes or a role switch are a separate choice.
@@ -195,12 +197,44 @@ Dictionary<TValue, HashSet<int>> lookup;  // for local search and the client's i
   - Client: `NetworkClientManager` sends to the server (`SendReliable(msg)`) and receives with `Subscribe<T>(Action<T>)`.
   - The module's messages override `ToBytes` / `ToMessage` instead of using NetCom's reflection-based default (section 4: no reflection).
 - NetCom's TCP has no length framing: each read is parsed as whole messages, and a message split across two reads is dropped. Receive buffers are 2048 bytes on the server and 100000 on the client. Message sizes must be designed around this (section 12).
-- The module depends on no networking library. It talks to a **transport**: send bytes to a client id, receive bytes with the sender's client id. An in-process loopback transport is used for tests (a server and several clients in one test) until the adapter for the team's library is written.
+- The module depends on no networking library. It talks to a **transport** (below). The NetCom adapter implements it; an in-process loopback transport implements it for tests.
+
+### Transport
+The core sits above these interfaces and never sees NetCom. The networking side sits below them and never sees rows.
+
+```csharp
+public interface IServerTransport
+{
+    void Send(int connectionId, byte[] data);
+    event Action<int> Connected;              // connection id
+    event Action<int> Disconnected;           // connection id
+    event Action<int, byte[]> DataReceived;   // connection id, data
+}
+
+public interface IClientTransport
+{
+    void Send(byte[] data);                   // always to the server
+    event Action Connected;
+    event Action Disconnected;
+    event Action<byte[]> DataReceived;
+}
+```
+
+- **Two interfaces:** a client only ever talks to the server, so its `Send` takes no id. NetCom fits both: the server's `SendReliable(msg, IPEndPoint)` and `OnClientConnect` / `OnClientDisconnect`, the client's `SendReliable(msg)` and `OnTcpConnected` / `OnTcpDisconnected`.
+- **Connection id, not client id:** the transport gives each connection a new `int`, never reused, and knows nothing about who the client is. The server NetCom adapter maps an `IPEndPoint` to a connection id only. Recognizing a returning client is the server Router's job (client identity above), because NetCom's port changes on every reconnect.
+- **No `SendToAll`:** recipients are always chosen by the server Router per list (principle 2), so the Router calls `Send` once per recipient. A transport-level "all" would also reach clients that haven't joined the list or said hello.
+- **What the transport promises:**
+  - Delivery is in order per connection.
+  - Every event is raised on Unity's main thread.
+  - A message **can be lost** without notice (NetCom has no length framing). How the module recovers is **Open** (section 12).
+  - After `Send`, the caller doesn't touch the `byte[]` again; the receiver gets its own copy.
+  - The transport never reads the bytes. The list id and message type are inside them, written by the Router.
+- **Loopback transport (tests):** one server side and several client sides in one process. `Send` queues the data; the test calls `loopback.DeliverAll()` to deliver everything queued, in order. A test can drop a chosen message on purpose to check recovery.
 
 ### Several lists on one connection
 - A project's server holds many lists. One **Router** per process (server or client) owns the connection and routes each module message to its list.
 - **The Router:** a plain C# class with a thin `MonoBehaviour` for scenes, never a static singleton, so a test can run one server Router and several client Routers in one process. The server Router also owns everything kept per client across lists: the client id, reconnect recognition and the reconnection data timer.
-- **List id:** every module message carries its list's id, a stable 32-bit FNV-1a hash of the list's name (never `string.GetHashCode()`). Server and clients compute it the same way because they build from one project. The server Router throws at registration if two names give the same id. Id `0` is reserved for the Router's own messages (join, reconnect).
+- **List id:** every module message carries its list's id, a stable 32-bit FNV-1a hash of the list's name (never `string.GetHashCode()`). Server and clients compute it the same way because they build from one project. The server Router throws at registration if two names give the same id. Id `0` is reserved for the Router's own messages (hello, join, leave).
 - **List definition:** each list is a `ScriptableObject` asset of a class from the list implementation, e.g. `DetectionQueueDefinition : SyncedListDefinition<DetectionRowData>`. The list's name defaults to the asset's name. The asset carries the row type, so `router.Get(detectionQueue)` returns the typed list with no cast. Two assets of the same class are two separate lists.
 - **Server lists come from the inspector only:** the server Router has a list of definition assets and creates those lists at startup. Lists aren't created from code at runtime, because each list needs its own config and that belongs in its asset.
 - **Joining:** a client puts a `SyncedListClient` component in its scene and drags the definition asset into it. When the component enables, the client Router sends a join on id `0`. On join, a new client's `heldKeys` is created from `keysForNewClients`, and a known client gets its full send with overrides (the same as a reconnect). Until a client joins a list, the server sends it nothing for that list; a message for a list the client hasn't joined is dropped, with a log in debug builds.
@@ -343,10 +377,11 @@ One project's implementation, used as a test case for the module, **not** its bl
 - **Where the NetCom adapter lives.** Proposal: its own folder without an `.asmdef` (e.g. `Assets/ModularSyncedListNetCom/`), compiled with NetCom, implementing the module's transport interface. The module and list implementations never reference it; a scene component hands it to the Router.
 - **NetCom message ids for the module.** Proposal: one `NetMessage` type for all module traffic (list id, message type, payload), so the module takes a single NetCom id. Which id, and how a project avoids a clash (NetCom only logs an error), is not decided.
 - **Message sizes under NetCom's missing framing.** A full send of many rows can be split across reads and dropped. Proposal: send each row as its own small message, keep client messages well under 2048 bytes, and measure a large full send over real NetCom early.
+- **Recovering from a lost message.** The transport can lose a message without notice (section 7, Transport). How a client or the server notices it is out of step, and how it gets back in sync (for example the client asking for a full send), is not decided.
+- **What the hello carries** so the server Router can recognize a returning client (section 7, Client identity). NetCom's port changes on every reconnect, and several clients can share a machine.
 
 ### Left for implementation
 - How a client gets a key for a row it creates (wait for the server, or a temporary key).
-- How the server recognizes a reconnecting client.
 - The exact timer and deletion rule for client reconnection data.
 - The exact form of `FieldOverrides`.
 

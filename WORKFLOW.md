@@ -28,7 +28,8 @@ How the team works on ModularSyncedList right now. Everyone, people and AI assis
 
 ## Decisions
 
-- **Open items stay open until the people who own them agree** (see `WORK_SPLIT.md`). A proposal is not a decision.
+- **One person can decide.** Whoever owns the topic (see `WORK_SPLIT.md`) can settle an Open item alone; there's no need for a second person's agreement. A proposal nobody has accepted is still not a decision.
+- After deciding, tell the others what changed (they also see it on their next pull). Anyone who disagrees reopens it as an **Open** item.
 - A decision goes into `concept.md` in the same commit as the discussion that made it, and moves out of §12 Open.
 - A change to a coworker's sections, or to §2 (terms), gets a heads-up to that coworker first.
 
